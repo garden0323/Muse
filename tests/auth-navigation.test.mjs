@@ -1,0 +1,26 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+
+const source=readFileSync('dist/native-auth.js','utf8');
+function page({hash='',returnRoute=null,member=true,sessionFailure=false,mfaRequired=false}={}){
+ const elements=new Map(),requests=[],replacements=[];let reloads=0;
+ const storage=new Map(returnRoute?[['muse-return-route',returnRoute]]:[]);
+ const submit={disabled:false};
+ const element=()=>({value:'',checked:false,disabled:false,textContent:'',querySelector:()=>submit,setAttribute(){},append(child){elements.set(child.id,child)}});
+ const gate=element();Object.defineProperty(gate,'innerHTML',{set(html){for(const key of [...elements.keys()])if(key!=='authGate')elements.delete(key);for(const match of html.matchAll(/id="([^"]+)"/g))elements.set(match[1],element());if(html.includes('id="continueAuth"'))elements.get('continueAuth').disabled=true;},get(){return ''}});elements.set('authGate',gate);
+ const location={hash,reload(){reloads++}};
+ const context={window:{history:{replaceState(state,title,url){replacements.push(url);location.hash=url.slice(url.indexOf('#'))}}},location,document:{getElementById:id=>elements.get(id)||null,createElement:()=>element(),body:{classList:{add(){}}}},sessionStorage:{getItem:key=>storage.get(key)||null,removeItem:key=>storage.delete(key)},fetch:async(url,options={})=>{requests.push({url,options});if(url.endsWith('/admin-mfa'))mfaRequired=false;const isSession=url==='/api/session',body=isSession?{member:member&&!mfaRequired,mfaRequired,user:member&&!mfaRequired?{id:'fixture-user'}:null}:url.endsWith('/options')?{mode:'native'}:url.endsWith('/register')?{ok:true,recoveryCode:'test-fixture-recovery-code'}:{ok:true};return{ok:!(isSession&&sessionFailure),async json(){return body}}},setTimeout,clearTimeout,navigator:{clipboard:{async writeText(){}}}};
+ vm.runInNewContext(source,context);
+ const submitForm=async()=>{elements.get('nativeHandle').value='fixture.user';elements.get('nativePassword').value='inert fixture value';if(elements.get('nativeConfirm'))elements.get('nativeConfirm').value='inert fixture value';if(elements.get('nativeCode'))elements.get('nativeCode').value='01234567';if(elements.get('nativeAgree'))elements.get('nativeAgree').checked=true;await elements.get('nativeForm').onsubmit({preventDefault(){},target:{querySelector:()=>submit}})};
+ return{context,elements,requests,replacements,storage,submit,submitForm,get reloads(){return reloads}};
+}
+
+test('successful login restarts document boot, including when already at #home',async()=>{for(const hash of ['', '#home']){const p=page({hash});await p.context.window.MuseAuth.show();await p.submitForm();assert.equal(p.reloads,1);assert.equal(p.replacements.at(-1),'/#home');assert.ok(p.requests.some(r=>r.url==='/api/session'&&r.options.credentials==='same-origin'));}});
+test('signup recovery confirmation restarts boot only after the user continues',async()=>{const p=page();await p.context.window.MuseAuth.show();p.elements.get('authRegister').onclick();await p.submitForm();assert.equal(p.reloads,0);assert.equal(p.elements.get('continueAuth').disabled,true);p.elements.get('savedRecovery').onchange({target:{checked:true}});assert.equal(p.elements.get('continueAuth').disabled,false);await p.elements.get('continueAuth').onclick();assert.equal(p.reloads,1);assert.equal(p.replacements.at(-1),'/#home');});
+test('login restores a protected share route; invalid or logout destinations use home',async()=>{for(const[returnRoute,expected]of [['#board/gallery-123','/#board/gallery-123'],['#messages/thread%3A123','/#messages/thread%3A123'],['#logout','/#home'],['//external.invalid','/#home']]){let p=page({returnRoute});await p.context.window.MuseAuth.show();await p.submitForm();assert.equal(p.reloads,1);assert.equal(p.replacements.at(-1),expected);assert.equal(p.storage.has('muse-return-route'),false);}});
+test('missing session cookie does not falsely navigate and permits login retry',async()=>{let p=page({member:false});await p.context.window.MuseAuth.show();await p.submitForm();assert.equal(p.reloads,0);assert.match(p.elements.get('nativeError').textContent,/쿠키/);assert.equal(p.submit.disabled,false);});
+test('session check failure keeps the recovery code screen and permits retry',async()=>{let p=page({sessionFailure:true});await p.context.window.MuseAuth.show();p.elements.get('authRegister').onclick();await p.submitForm();p.elements.get('savedRecovery').onchange({target:{checked:true}});await p.elements.get('continueAuth').onclick();assert.equal(p.reloads,0);assert.ok(p.elements.get('savedRecovery'));assert.match(p.elements.get('authTransitionError').textContent,/다시 시도/);assert.equal(p.elements.get('continueAuth').disabled,false);});
+
+test('admin login pauses at MFA then reloads only after second-factor completion',async()=>{let p=page({mfaRequired:true});await p.context.window.MuseAuth.show();await p.submitForm();assert.equal(p.reloads,0);assert.ok(p.elements.get('adminMfaForm'));p.elements.get('adminMfaCode').value='123456';await p.elements.get('adminMfaForm').onsubmit({preventDefault(){},target:{querySelector:()=>p.submit}});assert.equal(p.reloads,1);assert.equal(p.replacements.at(-1),'/#home')});

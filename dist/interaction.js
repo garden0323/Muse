@@ -1,0 +1,2 @@
+/* Input distance is measured in CSS pixels, independent of camera zoom. */
+(function(root){const api={start(p,time=performance.now()){return{x:p.x,y:p.y,time,dragged:false,cancelled:false}},move(g,p){if(Math.hypot(p.x-g.x,p.y-g.y)>7)g.dragged=true;return g.dragged},tap(g,p,time=performance.now()){this.move(g,p);return !g.dragged&&!g.cancelled&&time-g.time<=500}};if(typeof module==='object')module.exports=api;else root.MuseInput=api})(globalThis);
